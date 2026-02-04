@@ -1,0 +1,36 @@
+name: Super Bot (2GB)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install System Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg aria2
+
+    - name: Install Python Libraries
+      run: |
+        pip install -r requirements.txt
+
+    - name: Run Bot
+      env:
+        # You must add these 4 secrets in GitHub Settings -> Secrets
+        API_ID: ${{ secrets.API_ID }}
+        API_HASH: ${{ secrets.API_HASH }}
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        KEY: ${{ secrets.KEY }}
+      run: |
+        python bot.py
