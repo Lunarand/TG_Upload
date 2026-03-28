@@ -3,6 +3,10 @@ name: Super Bot (2GB)
 on:
   workflow_dispatch:
 
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
@@ -33,4 +37,18 @@ jobs:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         KEY: ${{ secrets.KEY }}
       run: |
-        python bot.py
+        # The timeout command stops the script after 330 minutes (5 hours 30 mins)
+        # The '|| true' prevents the workflow from failing when the timeout kills the bot
+        timeout 330m python bot.py || true
+
+    - name: Wait 20 seconds
+      run: |
+        sleep 20
+
+    - name: Restart New Workflow
+      env:
+        # GITHUB_TOKEN is automatically provided by GitHub, no need to add it to Secrets manually
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # Uses the GitHub CLI to trigger this exact same workflow again on the same branch
+        gh workflow run "${{ github.workflow }}" --ref "${{ github.ref }}"
