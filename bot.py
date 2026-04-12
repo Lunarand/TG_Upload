@@ -11,6 +11,7 @@ import subprocess
 import random
 import re
 import shutil
+import zipfile
 from telethon import TelegramClient, events, Button, errors
 
 # --- IMPORT INSTALOADER (For Instagram Fix) ---
@@ -220,7 +221,7 @@ async def send_main_menu(event):
     
     buttons = [
         [Button.text("Download Video", resize=True), Button.text("Screenshot")],
-        [Button.text("Show Queue 📋")],
+        [Button.text("Extract and Send 📦"), Button.text("Show Queue 📋")],
         [Button.text(fast_lbl), Button.text(norm_lbl)]
     ]
     await event.respond(f"🚀 **Super Bot Ready**\nLimit: **2GB per file**\nMode: **{mode.title()}**", buttons=buttons)
@@ -271,6 +272,12 @@ async def ss_btn(event):
     USER_DATA[event.sender_id]['state'] = 'waiting_ss'
     await event.respond("📸 **Send Link for Screenshot:**", buttons=Button.clear())
 
+@client.on(events.NewMessage(pattern='Extract and Send 📦'))
+async def extract_btn(event):
+    if not is_auth(event.sender_id): return
+    USER_DATA[event.sender_id]['state'] = 'waiting_zip'
+    await event.respond("📦 **Send the ZIP file you want to extract:**", buttons=Button.clear())
+
 @client.on(events.NewMessage(pattern='Show Queue 📋'))
 async def show_queue_handler(event):
     if not is_auth(event.sender_id): return
@@ -291,10 +298,10 @@ async def cancel_task_msg(event):
 # --- TEXT LISTENER ---
 @client.on(events.NewMessage)
 async def message_handler(event):
-    text = event.text
+    text = event.text or ""
     user_id = event.sender_id
     
-    if text.startswith('/') or text in ['Login', 'Download Video', 'Screenshot', '❌ Cancel Task', 'Show Queue 📋'] or "Mode" in text:
+    if text.startswith('/') or text in ['Login', 'Download Video', 'Screenshot', 'Extract and Send 📦', '❌ Cancel Task', 'Show Queue 📋'] or "Mode" in text:
         return
 
     if user_id not in USER_DATA: USER_DATA[user_id] = {}
@@ -319,6 +326,14 @@ async def message_handler(event):
         USER_DATA[user_id]['state'] = None
         return
 
+    if state == 'waiting_zip':
+        if event.document:
+            USER_DATA[user_id]['state'] = None
+            await process_zip_file(event)
+        else:
+            await event.respond("⚠️ **Please send a valid file/ZIP.**")
+        return
+
     is_link = text.startswith("http")
     if (state == 'waiting_link' and is_link) or (is_auth(user_id) and is_link):
         USER_DATA[user_id]['state'] = None
@@ -326,6 +341,95 @@ async def message_handler(event):
         return
 
 # --- CORE FUNCTIONS ---
+
+async def process_zip_file(event):
+    user_id = event.sender_id
+    status_msg = await event.respond("📥 **Downloading ZIP file...**")
+    
+    timestamp = int(time.time())
+    zip_path = f"downloads/temp_{user_id}_{timestamp}.zip"
+    extract_path = f"downloads/extracted_{user_id}_{timestamp}"
+    
+    if not os.path.exists("downloads"): os.makedirs("downloads")
+    
+    try:
+        # Download the zip file
+        await event.download_media(file=zip_path)
+        
+        await safe_edit(status_msg, "📦 **Extracting ZIP file...**")
+        
+        # Extract the zip file
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_path)
+        except zipfile.BadZipFile:
+            await safe_edit(status_msg, "❌ **Error: Not a valid ZIP file.**")
+            return
+            
+        # Find media files
+        all_files = []
+        for root, dirs, files in os.walk(extract_path):
+            for file in files:
+                all_files.append(os.path.join(root, file))
+                
+        photos = [f for f in all_files if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
+        videos = [f for f in all_files if f.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.webm', '.ts', '.flv'))]
+        
+        total_files = len(photos) + len(videos)
+        if total_files == 0:
+            await safe_edit(status_msg, "⚠️ **No photos or videos found in the ZIP.**")
+            return
+            
+        await safe_edit(status_msg, f"📊 **Extracted {len(all_files)} total files**\n📸 Photos: {len(photos)}\n🎥 Videos: {len(videos)}\n\n🚀 **Starting to send {total_files} media files...**")
+        
+        media_files = photos + videos
+        
+        for idx, file_path in enumerate(media_files, 1):
+            is_video = file_path in videos
+            file_name = os.path.basename(file_path)
+            
+            # Update Progress Bar Status
+            await safe_edit(status_msg, f"📤 **Sending {idx}/{total_files}**\nFile: `{file_name}`\n\n📊 Status: {idx-1} Sent / {total_files - idx + 1} Remaining")
+            
+            try:
+                if is_video:
+                    attributes = []
+                    try:
+                        cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
+                        res = subprocess.run(cmd, capture_output=True, text=True)
+                        dur = int(float(res.stdout.strip()))
+                        cmd_wh = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', file_path]
+                        res_wh = subprocess.run(cmd_wh, capture_output=True, text=True)
+                        w, h = map(int, res_wh.stdout.strip().split(','))
+                        from telethon.tl.types import DocumentAttributeVideo
+                        attributes = [DocumentAttributeVideo(duration=dur, w=w, h=h, supports_streaming=True)]
+                    except: pass
+                    
+                    thumb_path = f"{file_path}.jpg"
+                    subprocess.run(['ffmpeg', '-y', '-i', file_path, '-ss', '00:00:01', '-vframes', '1', thumb_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    
+                    await client.send_file(
+                        event.chat_id,
+                        file_path,
+                        attributes=attributes,
+                        supports_streaming=True,
+                        thumb=thumb_path if os.path.exists(thumb_path) else None
+                    )
+                    if os.path.exists(thumb_path): os.remove(thumb_path)
+                else:
+                    await client.send_file(event.chat_id, file_path)
+            except Exception as file_e:
+                logging.error(f"Failed to send {file_path}: {file_e}")
+                
+        await safe_edit(status_msg, f"✅ **Successfully sent {total_files} files from the ZIP!**\n📸 Photos: {len(photos)}\n🎥 Videos: {len(videos)}")
+        
+    except Exception as e:
+        await safe_edit(status_msg, f"❌ **Error processing ZIP:** {str(e)[:100]}")
+    finally:
+        # Cleanup temp files
+        if os.path.exists(zip_path): os.remove(zip_path)
+        if os.path.exists(extract_path): shutil.rmtree(extract_path, ignore_errors=True)
+        await send_main_menu(event)
 
 async def process_screenshot(event, url):
     if not url.startswith("http"): url = "https://" + url
